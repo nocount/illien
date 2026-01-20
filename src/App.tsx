@@ -23,6 +23,7 @@ function App() {
   const [darkMode, setDarkMode] = useState(() => {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const today = new Date().toISOString().split("T")[0];
   const todayFilename = `${today}.md`;
@@ -42,6 +43,7 @@ function App() {
       } catch (e) {
         console.error("Failed to load settings:", e);
       }
+      setSettingsLoaded(true);
     }
     loadSettings();
   }, []);
@@ -124,10 +126,12 @@ function App() {
     return () => clearTimeout(timer);
   }, [content, journalDirectory, currentEntry, saveEntry]);
 
-  // Save dark mode preference
+  // Save dark mode preference (only after settings have loaded)
   useEffect(() => {
-    invoke("set_dark_mode", { darkMode });
-  }, [darkMode]);
+    if (settingsLoaded) {
+      invoke("set_dark_mode", { darkMode });
+    }
+  }, [darkMode, settingsLoaded]);
 
   const handleSelectDirectory = async () => {
     try {
