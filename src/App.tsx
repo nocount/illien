@@ -3,21 +3,29 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import Editor from "./components/Editor";
 
+interface JournalEntry {
+  filename: string;
+  entry_type: "daily" | "titled";
+  title: string;
+  date: string | null;
+}
+
 function App() {
   const [content, setContent] = useState("");
   const [journalDirectory, setJournalDirectory] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "unsaved">("saved");
   const [showSettings, setShowSettings] = useState(false);
-  const [showSidebar, setShowSidebar] = useState(false);
-  const [entries, setEntries] = useState<string[]>([]);
-  const [selectedDate, setSelectedDate] = useState(() => {
-    return new Date().toISOString().split("T")[0];
-  });
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [showNewEntryModal, setShowNewEntryModal] = useState(false);
+  const [newEntryTitle, setNewEntryTitle] = useState("");
+  const [entries, setEntries] = useState<JournalEntry[]>([]);
+  const [currentEntry, setCurrentEntry] = useState<JournalEntry | null>(null);
   const [darkMode, setDarkMode] = useState(() => {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
 
   const today = new Date().toISOString().split("T")[0];
+  const todayFilename = `${today}.md`;
 
   // Load saved settings on mount
   useEffect(() => {
@@ -42,7 +50,7 @@ function App() {
   const loadEntries = useCallback(async () => {
     if (!journalDirectory) return;
     try {
-      const entryList = await invoke<string[]>("list_journal_entries", {
+      const entryList = await invoke<JournalEntry[]>("list_journal_entries", {
         directory: journalDirectory,
       });
       setEntries(entryList);
@@ -55,13 +63,25 @@ function App() {
     loadEntries();
   }, [loadEntries]);
 
-  // Load selected date's journal entry
+  // Set default entry to today when directory is loaded
+  useEffect(() => {
+    if (journalDirectory && !currentEntry) {
+      setCurrentEntry({
+        filename: todayFilename,
+        entry_type: "daily",
+        title: today,
+        date: today,
+      });
+    }
+  }, [journalDirectory, currentEntry, today, todayFilename]);
+
+  // Load current entry's content
   useEffect(() => {
     async function loadEntry() {
-      if (!journalDirectory) return;
+      if (!journalDirectory || !currentEntry) return;
       try {
         const entry = await invoke<string | null>("load_journal", {
-          date: selectedDate,
+          filename: currentEntry.filename,
           directory: journalDirectory,
         });
         setContent(entry || "");
@@ -71,38 +91,38 @@ function App() {
       }
     }
     loadEntry();
-  }, [journalDirectory, selectedDate]);
+  }, [journalDirectory, currentEntry]);
 
   // Auto-save with debounce
   const saveEntry = useCallback(async () => {
-    if (!journalDirectory) return;
+    if (!journalDirectory || !currentEntry) return;
     setSaveStatus("saving");
     try {
       await invoke("save_journal", {
-        date: selectedDate,
+        filename: currentEntry.filename,
         content: content,
         directory: journalDirectory,
       });
       setSaveStatus("saved");
-      // Refresh entries list if this is a new entry
-      if (!entries.includes(selectedDate) && content.trim() !== "") {
+      // Refresh entries list if content changed
+      if (content.trim() !== "") {
         loadEntries();
       }
     } catch (e) {
       console.error("Failed to save journal entry:", e);
       setSaveStatus("unsaved");
     }
-  }, [journalDirectory, selectedDate, content, entries, loadEntries]);
+  }, [journalDirectory, currentEntry, content, loadEntries]);
 
   // Debounced auto-save
   useEffect(() => {
-    if (!journalDirectory) return;
+    if (!journalDirectory || !currentEntry) return;
     setSaveStatus("unsaved");
     const timer = setTimeout(() => {
       saveEntry();
     }, 1000);
     return () => clearTimeout(timer);
-  }, [content, journalDirectory, saveEntry]);
+  }, [content, journalDirectory, currentEntry, saveEntry]);
 
   // Save dark mode preference
   useEffect(() => {
@@ -125,13 +145,60 @@ function App() {
     }
   };
 
-  const handleSelectEntry = (date: string) => {
-    setSelectedDate(date);
-    setShowSidebar(false);
+  const handleSelectEntry = (entry: JournalEntry) => {
+    setCurrentEntry(entry);
   };
 
   const handleGoToToday = () => {
-    setSelectedDate(today);
+    setCurrentEntry({
+      filename: todayFilename,
+      entry_type: "daily",
+      title: today,
+      date: today,
+    });
+  };
+
+  const handleCreateNewEntry = () => {
+    if (!newEntryTitle.trim()) return;
+
+    // Sanitize filename
+    const sanitizedTitle = newEntryTitle
+      .trim()
+      .replace(/[<>:"/\\|?*]/g, "-")
+      .replace(/\s+/g, " ");
+    const filename = `${sanitizedTitle}.md`;
+
+    const newEntry: JournalEntry = {
+      filename,
+      entry_type: "titled",
+      title: sanitizedTitle,
+      date: null,
+    };
+
+    setCurrentEntry(newEntry);
+    setContent("");
+    setNewEntryTitle("");
+    setShowNewEntryModal(false);
+  };
+
+  const handleDeleteEntry = async () => {
+    if (!journalDirectory || !currentEntry) return;
+    if (currentEntry.entry_type === "daily") return; // Don't delete daily entries
+
+    const confirmed = window.confirm(`Delete "${currentEntry.title}"?`);
+    if (!confirmed) return;
+
+    try {
+      await invoke("delete_journal", {
+        filename: currentEntry.filename,
+        directory: journalDirectory,
+      });
+      await loadEntries();
+      // Go back to today
+      handleGoToToday();
+    } catch (e) {
+      console.error("Failed to delete entry:", e);
+    }
   };
 
   const formatDate = (dateStr: string) => {
@@ -153,7 +220,17 @@ function App() {
     });
   };
 
-  const isToday = selectedDate === today;
+  const isToday = currentEntry?.filename === todayFilename;
+  const dailyEntries = entries.filter((e) => e.entry_type === "daily");
+  const titledEntries = entries.filter((e) => e.entry_type === "titled");
+
+  const getDisplayTitle = () => {
+    if (!currentEntry) return "";
+    if (currentEntry.entry_type === "daily" && currentEntry.date) {
+      return formatDate(currentEntry.date);
+    }
+    return currentEntry.title;
+  };
 
   return (
     <div className={`app ${darkMode ? "dark" : "light"}`}>
@@ -163,19 +240,28 @@ function App() {
             <button
               className="icon-button"
               onClick={() => setShowSidebar(!showSidebar)}
-              title="Past entries"
+              title="Entries"
             >
               📅
             </button>
           )}
-          <h1 className="date">{formatDate(selectedDate)}</h1>
-          {!isToday && (
+          <h1 className="date">{getDisplayTitle()}</h1>
+          {!isToday && currentEntry && (
             <button className="today-btn" onClick={handleGoToToday}>
               Today
             </button>
           )}
         </div>
         <div className="header-actions">
+          {currentEntry?.entry_type === "titled" && (
+            <button
+              className="icon-button delete-btn"
+              onClick={handleDeleteEntry}
+              title="Delete entry"
+            >
+              🗑️
+            </button>
+          )}
           <span className={`save-status ${saveStatus}`}>
             {saveStatus === "saved" && "Saved"}
             {saveStatus === "saving" && "Saving..."}
@@ -213,26 +299,56 @@ function App() {
         {showSidebar && journalDirectory && (
           <aside className="sidebar">
             <div className="sidebar-header">
-              <h2>Past Entries</h2>
-              <span className="entry-count">{entries.length} entries</span>
+              <h2>Entries</h2>
+              <button
+                className="new-entry-btn"
+                onClick={() => setShowNewEntryModal(true)}
+                title="New titled entry"
+              >
+                + New
+              </button>
             </div>
-            <ul className="entries-list">
-              {entries.length === 0 ? (
-                <li className="no-entries">No entries yet</li>
-              ) : (
-                entries.map((date) => (
-                  <li key={date}>
-                    <button
-                      className={`entry-item ${date === selectedDate ? "active" : ""}`}
-                      onClick={() => handleSelectEntry(date)}
-                    >
-                      <span className="entry-date">{formatShortDate(date)}</span>
-                      {date === today && <span className="today-badge">Today</span>}
-                    </button>
-                  </li>
-                ))
-              )}
-            </ul>
+
+            {titledEntries.length > 0 && (
+              <div className="entries-section">
+                <h3 className="section-title">Titled Entries</h3>
+                <ul className="entries-list">
+                  {titledEntries.map((entry) => (
+                    <li key={entry.filename}>
+                      <button
+                        className={`entry-item ${entry.filename === currentEntry?.filename ? "active" : ""}`}
+                        onClick={() => handleSelectEntry(entry)}
+                      >
+                        <span className="entry-title">{entry.title}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="entries-section">
+              <h3 className="section-title">Daily Entries</h3>
+              <ul className="entries-list">
+                {dailyEntries.length === 0 ? (
+                  <li className="no-entries">No entries yet</li>
+                ) : (
+                  dailyEntries.map((entry) => (
+                    <li key={entry.filename}>
+                      <button
+                        className={`entry-item ${entry.filename === currentEntry?.filename ? "active" : ""}`}
+                        onClick={() => handleSelectEntry(entry)}
+                      >
+                        <span className="entry-date">
+                          {entry.date && formatShortDate(entry.date)}
+                        </span>
+                        {entry.date === today && <span className="today-badge">Today</span>}
+                      </button>
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
           </aside>
         )}
 
@@ -248,6 +364,41 @@ function App() {
           <Editor content={content} onChange={setContent} />
         )}
       </div>
+
+      {showNewEntryModal && (
+        <div className="modal-overlay" onClick={() => setShowNewEntryModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>New Entry</h2>
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="Entry title..."
+              value={newEntryTitle}
+              onChange={(e) => setNewEntryTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleCreateNewEntry();
+                if (e.key === "Escape") setShowNewEntryModal(false);
+              }}
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button
+                className="modal-btn cancel"
+                onClick={() => setShowNewEntryModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="modal-btn create"
+                onClick={handleCreateNewEntry}
+                disabled={!newEntryTitle.trim()}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

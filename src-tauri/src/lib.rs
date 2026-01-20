@@ -37,18 +37,38 @@ fn save_settings(settings: &Settings) -> Result<(), String> {
         .map_err(|e| format!("Failed to write settings: {}", e))
 }
 
+/// Journal entry metadata
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct JournalEntry {
+    filename: String,
+    entry_type: String, // "daily" or "titled"
+    title: String,
+    date: Option<String>,
+}
+
+/// Check if a filename is a daily entry (YYYY-MM-DD.md format)
+fn is_daily_entry(filename: &str) -> bool {
+    filename.len() == 13
+        && filename.ends_with(".md")
+        && filename.chars().nth(4) == Some('-')
+        && filename.chars().nth(7) == Some('-')
+        && filename[..4].chars().all(|c| c.is_ascii_digit())
+        && filename[5..7].chars().all(|c| c.is_ascii_digit())
+        && filename[8..10].chars().all(|c| c.is_ascii_digit())
+}
+
 /// Save a journal entry to a file
 #[tauri::command]
-fn save_journal(date: String, content: String, directory: String) -> Result<(), String> {
-    let path = PathBuf::from(&directory).join(format!("{}.md", date));
+fn save_journal(filename: String, content: String, directory: String) -> Result<(), String> {
+    let path = PathBuf::from(&directory).join(&filename);
     fs::write(&path, content)
         .map_err(|e| format!("Failed to save journal entry: {}", e))
 }
 
 /// Load a journal entry from a file
 #[tauri::command]
-fn load_journal(date: String, directory: String) -> Result<Option<String>, String> {
-    let path = PathBuf::from(&directory).join(format!("{}.md", date));
+fn load_journal(filename: String, directory: String) -> Result<Option<String>, String> {
+    let path = PathBuf::from(&directory).join(&filename);
     if path.exists() {
         fs::read_to_string(&path)
             .map(Some)
@@ -58,30 +78,64 @@ fn load_journal(date: String, directory: String) -> Result<Option<String>, Strin
     }
 }
 
+/// Delete a journal entry
+#[tauri::command]
+fn delete_journal(filename: String, directory: String) -> Result<(), String> {
+    let path = PathBuf::from(&directory).join(&filename);
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete journal entry: {}", e))
+    } else {
+        Err("File does not exist".to_string())
+    }
+}
+
 /// List all journal entries in the directory
 #[tauri::command]
-fn list_journal_entries(directory: String) -> Result<Vec<String>, String> {
+fn list_journal_entries(directory: String) -> Result<Vec<JournalEntry>, String> {
     let dir_path = PathBuf::from(&directory);
-    let mut entries: Vec<String> = fs::read_dir(&dir_path)
+    let mut entries: Vec<JournalEntry> = fs::read_dir(&dir_path)
         .map_err(|e| format!("Failed to read directory: {}", e))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let file_name = entry.file_name().to_string_lossy().to_string();
-            // Match files like "2026-01-20.md"
-            if file_name.len() == 13
-                && file_name.ends_with(".md")
-                && file_name.chars().nth(4) == Some('-')
-                && file_name.chars().nth(7) == Some('-')
-            {
-                Some(file_name[..10].to_string())
+
+            if !file_name.ends_with(".md") {
+                return None;
+            }
+
+            if is_daily_entry(&file_name) {
+                // Daily entry: YYYY-MM-DD.md
+                let date = file_name[..10].to_string();
+                Some(JournalEntry {
+                    filename: file_name,
+                    entry_type: "daily".to_string(),
+                    title: date.clone(),
+                    date: Some(date),
+                })
             } else {
-                None
+                // Titled entry: anything else ending in .md
+                let title = file_name.trim_end_matches(".md").to_string();
+                Some(JournalEntry {
+                    filename: file_name,
+                    entry_type: "titled".to_string(),
+                    title,
+                    date: None,
+                })
             }
         })
         .collect();
 
-    // Sort by date descending (newest first)
-    entries.sort_by(|a, b| b.cmp(a));
+    // Sort: daily entries by date descending, then titled entries alphabetically
+    entries.sort_by(|a, b| {
+        match (&a.entry_type[..], &b.entry_type[..]) {
+            ("daily", "daily") => b.date.cmp(&a.date),
+            ("daily", "titled") => std::cmp::Ordering::Less,
+            ("titled", "daily") => std::cmp::Ordering::Greater,
+            _ => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+        }
+    });
+
     Ok(entries)
 }
 
@@ -121,6 +175,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_journal,
             load_journal,
+            delete_journal,
             list_journal_entries,
             get_journal_directory,
             set_journal_directory,
