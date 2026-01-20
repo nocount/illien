@@ -58,6 +58,33 @@ fn load_journal(date: String, directory: String) -> Result<Option<String>, Strin
     }
 }
 
+/// List all journal entries in the directory
+#[tauri::command]
+fn list_journal_entries(directory: String) -> Result<Vec<String>, String> {
+    let dir_path = PathBuf::from(&directory);
+    let mut entries: Vec<String> = fs::read_dir(&dir_path)
+        .map_err(|e| format!("Failed to read directory: {}", e))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            // Match files like "2026-01-20.md"
+            if file_name.len() == 13
+                && file_name.ends_with(".md")
+                && file_name.chars().nth(4) == Some('-')
+                && file_name.chars().nth(7) == Some('-')
+            {
+                Some(file_name[..10].to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by date descending (newest first)
+    entries.sort_by(|a, b| b.cmp(a));
+    Ok(entries)
+}
+
 /// Get the saved journal directory
 #[tauri::command]
 fn get_journal_directory() -> Option<String> {
@@ -94,6 +121,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_journal,
             load_journal,
+            list_journal_entries,
             get_journal_directory,
             set_journal_directory,
             get_dark_mode,
